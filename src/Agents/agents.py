@@ -1,37 +1,18 @@
 import os
 
-from langchain.agents import create_agent
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from src.Tools.tools import web_search, scrape_url
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # Model Initialization
 llm = ChatGoogleGenerativeAI(
-    model="gemini-3.8-flash",
+    model="gemini-1.5-flash",
     google_api_key=os.getenv("GOOGLE_API_KEY"),
     temperature=0.2,
 )
-
-
-# 1st Agent : Search Agent
-def build_search_agent():
-    return create_agent(
-        model= llm,
-        tools=[web_search],
-       
-    )
-
-# 2nd Agent : Reader Agent
-def build_reader_agent():
-    return create_agent(
-        model= llm,
-        tools=[scrape_url],
-
-    )
 
 
 #writer chain 
