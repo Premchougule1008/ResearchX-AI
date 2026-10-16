@@ -1,5 +1,7 @@
+import os
+
 from langchain.agents import create_agent
-from langchain_nvidia_ai_endpoints import ChatNVIDIA
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from src.Tools.tools import web_search, scrape_url
@@ -8,10 +10,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Model Initialization
-llm = ChatNVIDIA(
-    model="nvidia/nemotron-3.5-lightning-30b-a3b",
-    temperature=0,
-    timeout=60
+llm = ChatGoogleGenerativeAI(
+    model="gemini-3.8-flash",
+    google_api_key=os.getenv("GOOGLE_API_KEY"),
+    temperature=0.2,
 )
 
 
@@ -36,20 +38,20 @@ def build_reader_agent():
 
 writer_prompt = ChatPromptTemplate.from_messages([
     ("system", "You are an expert research writer. Write clear, structured and insightful reports."),
-    ("human", """Write a detailed research report on the topic below.
+    ("human", """Write a concise, useful research report on the topic below.
 
 Topic: {topic}
 
 Research Gathered:
 {research}
 
-Structure the report as:
+Keep the report under 500 words and structure it as:
 - Introduction
-- Key Findings (minimum 3 well-explained points)
+- Key Findings (3 concise points)
 - Conclusion
 - Sources (list all URLs found in the research)
 
-Be detailed, factual and professional."""),
+Be factual and professional. Avoid repetition."""),
 ])
 
 writer_chain = writer_prompt | llm | StrOutputParser()
