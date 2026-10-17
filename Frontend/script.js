@@ -290,7 +290,7 @@ async function runResearch(topic) {
     showPanel("results");
 
     if (payload.fallback) {
-      showToast("⚠ Model timed out — showing quick digest.");
+      showToast("⚠ AI unavailable — showing source-based digest.");
     } else {
       showToast("✓ Research complete!");
     }

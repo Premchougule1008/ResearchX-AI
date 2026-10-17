@@ -7,6 +7,7 @@ from src.Agents.agents import (
     search_agent,
     writer_chain,
 )
+from src.Tools.tools import web_search
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -19,8 +20,8 @@ def _parse_score(feedback: str) -> int:
 
 def _extract_url(text: str) -> str | None:
     """Return the first HTTP(S) URL found in a block of text."""
-    match = re.search(r"https?://[^\s,)\"'>]+", text)
-    return match.group(0).rstrip(".,)\"'>") if match else None
+    match = re.search(r"https?://[^\s\])}\"'>]+", text)
+    return match.group(0).rstrip(".,)") if match else None
 
 
 def _agent_output(result: dict) -> str:
@@ -29,6 +30,150 @@ def _agent_output(result: dict) -> str:
     if messages:
         return messages[-1].content
     return str(result)
+
+
+def _parse_search_results(results: str) -> list[dict[str, str]]:
+    """Extract source titles, URLs, and snippets from Tavily-style results."""
+    pattern = re.compile(
+        r"Title:\s*(.*?)\s+URL:\s*(.*?)\s+Snippet:\s*(.*?)"
+        r"(?=\s*----\s*Title:|\s*\Z)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    parsed = []
+    for title, url_text, snippet in pattern.findall(results):
+        url = _extract_url(url_text)
+        if url:
+            parsed.append({
+                "title": title.strip(),
+                "url": url,
+                "snippet": re.sub(r"\s+", " ", snippet).strip(),
+            })
+    return parsed
+
+
+def _build_data_science_roadmap(sources: list[dict[str, str]]) -> str:
+    """Organize only roadmap topics explicitly present in retrieved snippets."""
+    phases = [
+        (
+            "Programming foundations",
+            (
+                "data structures", "lists", "dictionaries", "sets", "functions",
+                "logical thinking", "program flow", "search and sorting algorithms",
+                "object-oriented programming", "external libraries",
+            ),
+        ),
+        (
+            "Statistics",
+            ("mean", "median", "distribution", "correlation"),
+        ),
+        (
+            "Data analytics",
+            ("collecting", "cleaning", "analyzing", "visualizing"),
+        ),
+        (
+            "Machine learning",
+            ("advanced machine learning", "machine learning"),
+        ),
+        (
+            "Deployment and cloud",
+            ("cloud integration", "real-world deployment", "deployment"),
+        ),
+    ]
+    roadmap_steps = []
+
+    for title, concepts in phases:
+        matched = []
+        citations = []
+        for source_index, source in enumerate(sources, start=1):
+            snippet = source["snippet"].lower()
+            for concept in concepts:
+                if re.search(rf"\b{re.escape(concept)}\b", snippet):
+                    label = concept.capitalize()
+                    if not any(concept in existing.lower() for existing in matched):
+                        matched.append(label)
+                    if source_index not in citations:
+                        citations.append(source_index)
+        if matched:
+            references = ", ".join(f"[{index}]" for index in citations)
+            roadmap_steps.append(
+                f"{len(roadmap_steps) + 1}. **{title}** — "
+                f"Focus on {', '.join(matched)}. {references}"
+            )
+
+    if not roadmap_steps:
+        return ""
+    return "## Learning roadmap\n" + "\n\n".join(roadmap_steps)
+
+
+def _source_digest(topic: str, state: dict, reason: str) -> dict:
+    """Return a readable, source-grounded brief when the AI model is unavailable."""
+    if not state.get("search_results"):
+        state["search_results"] = web_search.invoke({"query": topic})
+    if not state["search_results"].strip():
+        raise RuntimeError("Web search returned no results for the requested topic.")
+
+    sources = _parse_search_results(state["search_results"])
+    if not sources:
+        state["search_results"] = web_search.invoke({"query": topic})
+        sources = _parse_search_results(state["search_results"])
+    if not sources:
+        raise RuntimeError("Search results did not contain any usable source snippets.")
+
+    source_list = "\n".join(
+        f"- [{source['title']}]({source['url']})"
+        for source in sources
+    )
+    if re.search(r"\broadmap\b", topic, re.IGNORECASE) and re.search(
+        r"data\s*science", topic, re.IGNORECASE
+    ):
+        content = _build_data_science_roadmap(sources)
+        if not content:
+            content = "## Search findings\n" + "\n\n".join(
+                f"{index}. **{source['title']}** — "
+                f"{source['snippet'] or 'No search snippet was provided.'}"
+                for index, source in enumerate(sources, start=1)
+            )
+        state["report"] = (
+            f"# Data science roadmap\n\n"
+            f"## Overview\n"
+            f"A step-by-step learning sequence based on {len(sources)} "
+            f"search sources for “{topic}”.\n\n"
+            f"{content}\n\n"
+            f"## Sources\n{source_list}"
+        )
+    else:
+        findings = "\n\n".join(
+            f"{index}. **{source['title']}**\n"
+            f"   {source['snippet'] or 'No search snippet was provided.'}"
+            for index, source in enumerate(sources, start=1)
+        )
+        state["report"] = (
+            f"# Research brief: {topic}\n\n"
+            f"## Overview\n"
+            f"The search returned {len(sources)} sources related to this topic.\n\n"
+            f"## Findings\n{findings}\n\n"
+            f"## Sources\n{source_list}"
+        )
+    state["scraped_content"] = (
+        "Full-page extraction was skipped because the AI service quota is "
+        "unavailable. Use the source links in the report to read the articles."
+    )
+    state["feedback"] = (
+        f"AI review unavailable — {reason} "
+        "This brief contains search snippets only; verify findings against "
+        "the linked sources."
+    )
+    state["fallback"] = True
+    return state
+
+
+def _is_quota_error(error: Exception) -> bool:
+    message = str(error).lower()
+    return (
+        "resource_exhausted" in message
+        or "quota exceeded" in message
+        or ("429" in message and "quota" in message)
+    )
 
 
 # ── Orchestrator ──────────────────────────────────────────────────────────────
@@ -112,19 +257,7 @@ def run_research_pipeline(topic: str) -> dict:
                     ),
                 })
             except requests.exceptions.Timeout:
-                state["report"] = (
-                    "Quick source digest (AI report unavailable)\n\n"
-                    "The AI model timed out. This is a digest of retrieved source "
-                    "material, not an AI-generated synthesis.\n\n"
-                    f"Search findings:\n{state['search_results']}\n\n"
-                    f"Extracted source text:\n{state['scraped_content']}"
-                )
-                state["fallback"] = True
-                state["feedback"] = (
-                    "AI review unavailable — the model request timed out. "
-                    "Please verify the findings against the linked sources."
-                )
-                return state
+                return _source_digest(topic, state, "The AI model timed out.")
 
             print("\n[Draft report]\n", state["report"])
 
@@ -151,6 +284,22 @@ def run_research_pipeline(topic: str) -> dict:
         return state
 
     except Exception as exc:
+        if _is_quota_error(exc):
+            print("\n  ⚠ Gemini quota exhausted — returning a source-based digest.")
+            try:
+                return _source_digest(
+                    topic,
+                    state,
+                    "The Gemini API quota is exhausted.",
+                )
+            except Exception as fallback_exc:
+                state["error"] = (
+                    "Gemini quota is exhausted and source fallback failed: "
+                    f"{fallback_exc}"
+                )
+                print(f"  ❌ Source fallback failed: {fallback_exc}")
+                return state
+
         state["error"] = str(exc)
         print("\n  ❌ Terminal error — research pipeline failed.")
         print("  Check your API credentials and billing/quota settings.")
